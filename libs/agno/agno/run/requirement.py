@@ -35,17 +35,11 @@ class RunRequirement:
     member_agent_name: Optional[str] = None
     member_run_id: Optional[str] = None
 
-    # Pre-hook execution control
-    # When False (default), pre-hooks are skipped on continue_run
-    # Set to True to explicitly run pre-hooks (e.g., for security-sensitive tools)
-    execute_pre_hooks: bool = False
-
     def __init__(
         self,
         tool_execution: ToolExecution,
         id: Optional[str] = None,
         created_at: Optional[datetime] = None,
-        execute_pre_hooks: bool = False,
     ):
         self.id = id or str(uuid4())
         self.tool_execution = tool_execution
@@ -58,7 +52,6 @@ class RunRequirement:
         self.member_agent_id = None
         self.member_agent_name = None
         self.member_run_id = None
-        self.execute_pre_hooks = execute_pre_hooks
         # Internal: holds a reference to the member's paused RunOutput so
         # continue_run can pass it directly without a session lookup.
         self._member_run_response: Any = None
@@ -218,7 +211,6 @@ class RunRequirement:
             "member_agent_id": self.member_agent_id,
             "member_agent_name": self.member_agent_name,
             "member_run_id": self.member_run_id,
-            "execute_pre_hooks": self.execute_pre_hooks,
         }
 
         if self.tool_execution is not None:
@@ -270,7 +262,6 @@ class RunRequirement:
             tool_execution=tool_execution,
             id=data.get("id"),
             created_at=created_at,
-            execute_pre_hooks=data.get("execute_pre_hooks", False),
         )
 
         # Set optional fields

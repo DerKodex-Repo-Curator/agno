@@ -472,7 +472,7 @@ def test_continue_run_stream_emits_pre_hook_events(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# execute_pre_hooks flag on RunRequirement
+# @hook(run_on_continue=True) decorator filtering
 # ---------------------------------------------------------------------------
 
 
