@@ -6417,6 +6417,14 @@ def continue_run_dispatch(
     # Initialize the Team
     team.initialize_team(debug_mode=debug_mode)
 
+    # Normalise hooks & guardrails (same as run_dispatch)
+    if not team._hooks_normalised:
+        if team.pre_hooks:
+            team.pre_hooks = normalize_pre_hooks(team.pre_hooks)  # type: ignore
+        if team.post_hooks:
+            team.post_hooks = normalize_post_hooks(team.post_hooks)  # type: ignore
+        team._hooks_normalised = True
+
     # Read existing session from storage
     team_session = _read_or_create_session(team, session_id=session_id, user_id=user_id)
     _update_metadata(team, session=team_session)
@@ -7799,6 +7807,14 @@ def acontinue_run_dispatch(  # type: ignore
 
     # Initialize the Team
     team.initialize_team(debug_mode=debug_mode)
+
+    # Normalise hooks & guardrails (same as arun_dispatch)
+    if not team._hooks_normalised:
+        if team.pre_hooks:
+            team.pre_hooks = normalize_pre_hooks(team.pre_hooks, async_mode=True)  # type: ignore
+        if team.post_hooks:
+            team.post_hooks = normalize_post_hooks(team.post_hooks, async_mode=True)  # type: ignore
+        team._hooks_normalised = True
 
     # Resolve run options
     opts = resolve_run_options(

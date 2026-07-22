@@ -3,12 +3,16 @@
 Regression coverage for the gap where run()/arun() execute pre_hooks but
 continue_run()/acontinue_run() (and their streaming variants) used to skip
 them — allowing HITL-resumed team runs to bypass guardrail/authz hooks.
+
+On continue_run, only hooks decorated with @hook(run_on_continue=True) or
+guardrails execute. Plain hooks are skipped since input was already validated.
 """
 
 import asyncio
 
 import agno.team._telemetry as team_telemetry
 from agno.exceptions import InputCheckError
+from agno.hooks import hook
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.run import RunContext, RunStatus
@@ -65,6 +69,7 @@ async def _empty_async_generator(*args, **kwargs):
 def test_team_continue_run_executes_pre_hooks(monkeypatch):
     calls = []
 
+    @hook(run_on_continue=True)
     def pre_hook(run_input=None, session=None, user_id=None):
         calls.append({"session_id": getattr(session, "session_id", None), "user_id": user_id})
 
@@ -88,6 +93,7 @@ def test_team_continue_run_executes_pre_hooks(monkeypatch):
 
 
 def test_team_continue_run_pre_hook_guardrail_blocks_model_call(monkeypatch):
+    @hook(run_on_continue=True)
     def blocking_hook(run_input=None):
         raise InputCheckError("authz denied on team resume")
 
@@ -119,6 +125,7 @@ def test_team_continue_run_pre_hook_guardrail_blocks_model_call(monkeypatch):
 def test_team_continue_run_stream_executes_pre_hooks(monkeypatch):
     calls = []
 
+    @hook(run_on_continue=True)
     def pre_hook(run_input=None, session=None, user_id=None):
         calls.append(getattr(session, "session_id", None))
 
@@ -160,6 +167,7 @@ def test_team_acontinue_run_executes_pre_hooks(monkeypatch):
     async def main():
         calls = []
 
+        @hook(run_on_continue=True)
         async def pre_hook(run_input=None, session=None):
             calls.append(getattr(session, "session_id", None))
 
@@ -200,6 +208,7 @@ def test_team_acontinue_run_executes_pre_hooks(monkeypatch):
 
 def test_team_acontinue_run_pre_hook_guardrail_blocks(monkeypatch):
     async def main():
+        @hook(run_on_continue=True)
         def blocking_hook(run_input=None):
             raise InputCheckError("authz denied on team resume")
 
@@ -247,6 +256,7 @@ def test_team_acontinue_run_stream_executes_pre_hooks(monkeypatch):
     async def main():
         calls = []
 
+        @hook(run_on_continue=True)
         async def pre_hook(run_input=None, session=None):
             calls.append(getattr(session, "session_id", None))
 
@@ -300,6 +310,7 @@ class _FakeBackgroundTasks:
 def test_team_continue_run_background_mode_queues_non_guardrail_hooks(monkeypatch):
     executed = []
 
+    @hook(run_on_continue=True)
     def audit_hook(run_input=None, session=None):
         executed.append(1)
 
@@ -329,6 +340,7 @@ def test_team_continue_run_background_mode_queues_non_guardrail_hooks(monkeypatc
 def test_team_continue_run_stream_emits_pre_hook_events(monkeypatch):
     calls = []
 
+    @hook(run_on_continue=True)
     def pre_hook(run_input=None, session=None):
         calls.append(1)
 

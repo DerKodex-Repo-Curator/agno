@@ -3325,6 +3325,14 @@ def continue_run_dispatch(
     # Initialize the Agent
     agent.initialize_agent(debug_mode=debug_mode)
 
+    # Normalise hooks & guardrails (same as run_dispatch)
+    if not agent._hooks_normalised:
+        if agent.pre_hooks:
+            agent.pre_hooks = normalize_pre_hooks(agent.pre_hooks)  # type: ignore
+        if agent.post_hooks:
+            agent.post_hooks = normalize_post_hooks(agent.post_hooks)  # type: ignore
+        agent._hooks_normalised = True
+
     # Read existing session from storage
     agent_session = read_or_create_session(agent, session_id=session_id, user_id=user_id)
     update_metadata(agent, session=agent_session)
@@ -4248,6 +4256,14 @@ def acontinue_run_dispatch(  # type: ignore
 
     # Initialize the Agent
     agent.initialize_agent(debug_mode=debug_mode)
+
+    # Normalise hooks & guardrails (same as arun_dispatch)
+    if not agent._hooks_normalised:
+        if agent.pre_hooks:
+            agent.pre_hooks = normalize_pre_hooks(agent.pre_hooks, async_mode=True)  # type: ignore
+        if agent.post_hooks:
+            agent.post_hooks = normalize_post_hooks(agent.post_hooks, async_mode=True)  # type: ignore
+        agent._hooks_normalised = True
 
     # Read existing session and update metadata BEFORE resolving run options,
     # so that session-stored metadata is visible to resolve_run_options.
