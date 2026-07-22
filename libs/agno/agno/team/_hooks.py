@@ -262,7 +262,7 @@ def _execute_pre_hooks(
     # 1. Hooks decorated with @hook(run_on_continue=True)
     # 2. Guardrails (security-critical, always run)
     if is_continue:
-        hooks = [h for h in hooks if should_run_on_continue(h) or is_guardrail_hook(h)]
+        hooks = [hook for hook in hooks if should_run_on_continue(hook) or is_guardrail_hook(hook)]
         if not hooks:
             return
 
@@ -369,7 +369,7 @@ async def _aexecute_pre_hooks(
     # 1. Hooks decorated with @hook(run_on_continue=True)
     # 2. Guardrails (security-critical, always run)
     if is_continue:
-        hooks = [h for h in hooks if should_run_on_continue(h) or is_guardrail_hook(h)]
+        hooks = [hook for hook in hooks if should_run_on_continue(hook) or is_guardrail_hook(hook)]
         if not hooks:
             return
 
