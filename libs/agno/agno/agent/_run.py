@@ -3605,7 +3605,7 @@ def _continue_run(
     """Continue a previous run.
 
     Steps:
-    1. Execute pre-hooks (before any side effects)
+    1. Execute pre-hooks
     2. Handle any updated tools
     3. Generate a response from the Model
     4. Update the RunOutput with the model response
@@ -3860,7 +3860,7 @@ def _continue_run_stream(
 
     Steps:
     1. Resolve dependencies
-    2. Execute pre-hooks (before any side effects)
+    2. Execute pre-hooks
     3. Handle any updated tools
     4. Process model response
     5. Execute post-hooks
@@ -3885,15 +3885,6 @@ def _continue_run_stream(
         # 1. Resolve dependencies
         if run_context.dependencies is not None:
             resolve_run_dependencies(agent, run_context=run_context)
-
-        # Yield RunContinued event
-        if stream_events:
-            yield handle_event(  # type: ignore
-                create_run_continued_event(run_response),
-                run_response,
-                events_to_skip=agent.events_to_skip,  # type: ignore
-                store_events=agent.store_events,
-            )
 
         # 2. Execute pre-hooks
         run_input = cast(RunInput, run_response.input)
@@ -3927,6 +3918,15 @@ def _continue_run_stream(
                 if yield_run_output:
                     yield run_response
                 return
+
+        # Start the Run by yielding a RunContinued event
+        if stream_events:
+            yield handle_event(  # type: ignore
+                create_run_continued_event(run_response),
+                run_response,
+                events_to_skip=agent.events_to_skip,  # type: ignore
+                store_events=agent.store_events,
+            )
 
         # 3. Handle the updated tools
         for event in handle_tool_call_updates_stream(
@@ -4580,7 +4580,7 @@ async def _acontinue_run(
     4. Prepare run response
     5. Determine tools for model
     6. Prepare run messages
-    7. Execute pre-hooks (before any side effects)
+    7. Execute pre-hooks
     8. Handle the updated tools
     9. Get model response
     10. Update the RunOutput with the model response
@@ -5135,7 +5135,7 @@ async def _acontinue_run_stream(
     4. Prepare run response
     5. Determine tools for model
     6. Prepare run messages
-    7. Execute pre-hooks (before any side effects)
+    7. Execute pre-hooks
     8. Handle the updated tools
     9. Process model response
     10. Create session summary
@@ -5346,15 +5346,6 @@ async def _acontinue_run_stream(
         # Register run for cancellation tracking
         await aregister_run(run_response.run_id)  # type: ignore
 
-        # Start the Run by yielding a RunContinued event
-        if stream_events:
-            yield handle_event(  # type: ignore
-                create_run_continued_event(run_response),
-                run_response,
-                events_to_skip=agent.events_to_skip,  # type: ignore
-                store_events=agent.store_events,
-            )
-
         # 7. Execute pre-hooks
         run_input = cast(RunInput, run_response.input)
         if agent.pre_hooks is not None:
@@ -5387,6 +5378,15 @@ async def _acontinue_run_stream(
                 if yield_run_output:
                     yield run_response
                 return
+
+        # Start the Run by yielding a RunContinued event
+        if stream_events:
+            yield handle_event(  # type: ignore
+                create_run_continued_event(run_response),
+                run_response,
+                events_to_skip=agent.events_to_skip,  # type: ignore
+                store_events=agent.store_events,
+            )
 
         # 8. Handle the updated tools
         async for event in ahandle_tool_call_updates_stream(
