@@ -119,7 +119,7 @@ def hook(*args, **kwargs) -> Union[F, Callable[[F], F]]:
         run_on_continue = kwargs.get("run_on_continue", False)
 
         # Preserve existing hook attributes from previously applied decorators
-        # Use OR logic: if any decorator sets the flag to True, it stays True
+        # Use OR logic: if any decorator sets run_in_background=True, it stays True
         existing_run_in_background = should_run_in_background(func)
         existing_run_on_continue = should_run_on_continue(func)
         final_run_in_background = run_in_background or existing_run_in_background

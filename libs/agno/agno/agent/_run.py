@@ -3325,7 +3325,7 @@ def continue_run_dispatch(
     # Initialize the Agent
     agent.initialize_agent(debug_mode=debug_mode)
 
-    # Normalise hooks & guardrails (same as run_dispatch)
+    # Normalise hooks & guardrails
     if not agent._hooks_normalised:
         if agent.pre_hooks:
             agent.pre_hooks = normalize_pre_hooks(agent.pre_hooks)  # type: ignore
@@ -4269,7 +4269,7 @@ def acontinue_run_dispatch(  # type: ignore
     # Initialize the Agent
     agent.initialize_agent(debug_mode=debug_mode)
 
-    # Normalise hooks & guardrails (same as arun_dispatch)
+    # Normalise hooks & guardrails
     if not agent._hooks_normalised:
         if agent.pre_hooks:
             agent.pre_hooks = normalize_pre_hooks(agent.pre_hooks, async_mode=True)  # type: ignore
