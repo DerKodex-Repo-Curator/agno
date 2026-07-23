@@ -3632,7 +3632,7 @@ def _continue_run(
 
     agent.model = cast(Model, agent.model)
 
-    # 1. Execute pre-hooks (only hooks with @hook(run_on_continue=True) will run)
+    # 1. Execute pre-hooks
     run_input = cast(RunInput, run_response.input)
     if agent.pre_hooks is not None:
         try:
@@ -3662,7 +3662,7 @@ def _continue_run(
             )
             return run_response
 
-    # 2. Handle the updated tools (executes confirmed HITL tools)
+    # 2. Handle the updated tools
     handle_tool_call_updates(agent, run_response=run_response, run_messages=run_messages, tools=tools)
 
     try:
@@ -3880,14 +3880,13 @@ def _continue_run_stream(
 
     register_run(run_response.run_id)  # type: ignore
 
-    # Wrap everything in try/finally to ensure cleanup on generator close
     num_attempts = agent.retries + 1
     try:
-        # 1. Resolve dependencies (ONCE, not per retry)
+        # 1. Resolve dependencies
         if run_context.dependencies is not None:
             resolve_run_dependencies(agent, run_context=run_context)
 
-        # Start the Run by yielding a RunContinued event
+        # Yield RunContinued event
         if stream_events:
             yield handle_event(  # type: ignore
                 create_run_continued_event(run_response),
@@ -3896,8 +3895,7 @@ def _continue_run_stream(
                 store_events=agent.store_events,
             )
 
-        # 2. Execute pre-hooks (ONCE, not per retry)
-        # Only hooks with @hook(run_on_continue=True) will run
+        # 2. Execute pre-hooks
         run_input = cast(RunInput, run_response.input)
         if agent.pre_hooks is not None:
             try:
@@ -3930,8 +3928,7 @@ def _continue_run_stream(
                     yield run_response
                 return
 
-        # 3. Handle the updated tools (ONCE, not per retry)
-        # This executes confirmed HITL tools — must not repeat on retry
+        # 3. Handle the updated tools
         for event in handle_tool_call_updates_stream(
             agent,
             run_response=run_response,
@@ -3943,7 +3940,6 @@ def _continue_run_stream(
                 raise_if_cancelled(run_response.run_id)  # type: ignore
             yield event
 
-        # Set up retry logic - only the model call retries
         for attempt in range(num_attempts):
             try:
                 # 4. Process model response
@@ -4613,10 +4609,6 @@ async def _acontinue_run(
     run_messages: Optional[RunMessages] = None
 
     try:
-        # ============================================================
-        # SETUP PHASE — runs ONCE, not per retry
-        # ============================================================
-
         # 1. Read existing session from db
         agent_session = await aread_or_create_session(agent, session_id=session_id, user_id=user_id)
 
@@ -4731,9 +4723,7 @@ async def _acontinue_run(
                 updated_tools = [req.tool_execution for req in requirements if req.tool_execution is not None]
                 if updated_tools and run_response.tools:
                     updated_tools_map = {tool.tool_call_id: tool for tool in updated_tools}
-                    run_response.tools = [
-                        updated_tools_map.get(tool.tool_call_id, tool) for tool in run_response.tools
-                    ]
+                    run_response.tools = [updated_tools_map.get(tool.tool_call_id, tool) for tool in run_response.tools]
                 else:
                     run_response.tools = updated_tools
 
@@ -4744,9 +4734,7 @@ async def _acontinue_run(
                 # 2. The run has no unresolved requirements → just resume from current
                 #    state (mid-flight resume, ERROR retry, time-travel, etc.). This
                 #    is the unified /continue path (ADR-003, ADR-004).
-                has_unresolved_requirements = any(
-                    not req.is_resolved() for req in (run_response.requirements or [])
-                )
+                has_unresolved_requirements = any(not req.is_resolved() for req in (run_response.requirements or []))
                 if has_unresolved_requirements:
                     from agno.run.approval import acheck_and_apply_approval_resolution
 
@@ -4805,8 +4793,7 @@ async def _acontinue_run(
         # Register run for cancellation tracking
         await aregister_run(run_response.run_id)  # type: ignore
 
-        # 7. Execute pre-hooks (ONCE, not per retry)
-        # Only hooks with @hook(run_on_continue=True) will run
+        # 7. Execute pre-hooks
         run_input = cast(RunInput, run_response.input)
         if agent.pre_hooks is not None:
             try:
@@ -4837,20 +4824,16 @@ async def _acontinue_run(
                 )
                 return run_response
 
-        # 8. Handle the updated tools (ONCE, not per retry)
-        # This executes confirmed HITL tools — must not repeat on retry
-        await ahandle_tool_call_updates(
-            agent, run_response=run_response, run_messages=run_messages, tools=_tools
-        )
+        # 8. Handle the updated tools
+        await ahandle_tool_call_updates(agent, run_response=run_response, run_messages=run_messages, tools=_tools)
 
-        # ============================================================
-        # RETRY PHASE — only the model call retries
-        # ============================================================
         num_attempts = agent.retries + 1
         for attempt in range(num_attempts):
             try:
                 if attempt > 0:
-                    log_debug(f"Retrying Agent acontinue_run {run_response.run_id}. Attempt {attempt + 1} of {num_attempts}...")
+                    log_debug(
+                        f"Retrying Agent acontinue_run {run_response.run_id}. Attempt {attempt + 1} of {num_attempts}..."
+                    )
 
                 # 9. Get model response
                 model_response: ModelResponse = await acall_model_with_fallback(
@@ -5178,10 +5161,6 @@ async def _acontinue_run_stream(
     run_messages: Optional[RunMessages] = None
 
     try:
-        # ============================================================
-        # SETUP PHASE — runs ONCE, not per retry
-        # ============================================================
-
         # 1. Read existing session from db
         agent_session = await aread_or_create_session(agent, session_id=session_id, user_id=user_id)
 
@@ -5297,9 +5276,7 @@ async def _acontinue_run_stream(
                 updated_tools = [req.tool_execution for req in requirements if req.tool_execution is not None]
                 if updated_tools and run_response.tools:
                     updated_tools_map = {tool.tool_call_id: tool for tool in updated_tools}
-                    run_response.tools = [
-                        updated_tools_map.get(tool.tool_call_id, tool) for tool in run_response.tools
-                    ]
+                    run_response.tools = [updated_tools_map.get(tool.tool_call_id, tool) for tool in run_response.tools]
                 else:
                     run_response.tools = updated_tools
 
@@ -5310,9 +5287,7 @@ async def _acontinue_run_stream(
                 # 2. The run has no unresolved requirements → just resume from current
                 #    state (ERROR retry, time-travel, etc.). This is the unified
                 #    /continue path (ADR-003, ADR-004).
-                has_unresolved_requirements = any(
-                    not req.is_resolved() for req in (run_response.requirements or [])
-                )
+                has_unresolved_requirements = any(not req.is_resolved() for req in (run_response.requirements or []))
                 if has_unresolved_requirements:
                     from agno.run.approval import acheck_and_apply_approval_resolution
 
@@ -5380,8 +5355,7 @@ async def _acontinue_run_stream(
                 store_events=agent.store_events,
             )
 
-        # 7. Execute pre-hooks (ONCE, not per retry)
-        # Only hooks with @hook(run_on_continue=True) will run
+        # 7. Execute pre-hooks
         run_input = cast(RunInput, run_response.input)
         if agent.pre_hooks is not None:
             try:
@@ -5414,8 +5388,7 @@ async def _acontinue_run_stream(
                     yield run_response
                 return
 
-        # 8. Handle the updated tools (ONCE, not per retry)
-        # This executes confirmed HITL tools — must not repeat on retry
+        # 8. Handle the updated tools
         async for event in ahandle_tool_call_updates_stream(
             agent,
             run_response=run_response,
@@ -5427,14 +5400,13 @@ async def _acontinue_run_stream(
                 await araise_if_cancelled(run_response.run_id)  # type: ignore
             yield event
 
-        # ============================================================
-        # RETRY PHASE — only the model call retries
-        # ============================================================
         num_attempts = agent.retries + 1
         for attempt in range(num_attempts):
             try:
                 if attempt > 0:
-                    log_debug(f"Retrying Agent acontinue_run_stream {run_response.run_id}. Attempt {attempt + 1} of {num_attempts}...")
+                    log_debug(
+                        f"Retrying Agent acontinue_run_stream {run_response.run_id}. Attempt {attempt + 1} of {num_attempts}..."
+                    )
 
                 # 9. Process model response
                 if agent.output_model is None:
