@@ -7,7 +7,14 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from agno.sandbox.base import SandboxError
-from agno.sandbox.checkpoint import CheckpointArchive, CheckpointRef, FileCheckpointStore, _name, _regular, _thread
+from agno.sandbox.checkpoint import (
+    CheckpointArchive,
+    CheckpointRef,
+    CheckpointStore,
+    _archive_bytes,
+    _name,
+    _thread,
+)
 from agno.sandbox.postgres import PostgresSandboxStore
 
 
@@ -37,7 +44,7 @@ class SandboxArtifacts:
     """
 
     def __init__(
-        self, store: PostgresSandboxStore, objects: FileCheckpointStore, *, max_file_bytes: int = 8 * 1024 * 1024
+        self, store: PostgresSandboxStore, objects: CheckpointStore, *, max_file_bytes: int = 8 * 1024 * 1024
     ) -> None:
         if type(max_file_bytes) is not int or not 1 <= max_file_bytes <= 64 * 1024 * 1024:
             raise ValueError("Artifact byte limit must be between 1 byte and 64 MiB")
@@ -91,43 +98,45 @@ class SandboxArtifacts:
         if not record.get("checkpoint"):
             raise SandboxArtifactNotFound("No completed sandbox checkpoint")
         reference = CheckpointRef(**record["checkpoint"])
-        source = self.objects.verify(reference)
-        archive = CheckpointArchive()
-        state = archive.validate(source)
-        if (
-            state.get("binding") != record.get("checkpoint_identity")
-            or state.get("binding", {}).get("incarnation") != record["incarnation"]
-        ):
-            raise SandboxError("Artifact checkpoint does not match this session")
-        with _regular(source) as stream, tarfile.open(fileobj=stream, mode="r:") as contents:
-            if path is None:
-                files = sorted(
-                    (member.name[len("workspace/") :], member.size)
-                    for member in contents
-                    if member.isfile() and member.name.startswith("workspace/")
-                )
-                return {
-                    "checkpoint": reference.sha256,
-                    "run_id": record["last_run_id"],
-                    "total": len(files),
-                    "files": [{"path": name, "size": size} for name, size in files[offset : offset + limit]],
-                }
-            name = "workspace/" + path
-            _name(name)
-            try:
-                member = contents.getmember(name)
-            except KeyError as error:
-                raise SandboxArtifactNotFound("Workspace artifact not found") from error
-            if not member.isfile():
-                raise SandboxArtifactNotFound("Artifact must be a regular workspace file")
-            if member.size > self.max_file_bytes:
-                raise SandboxError("Artifact exceeds the download byte limit")
-            source_file = contents.extractfile(member)
-            assert source_file is not None
-            content = source_file.read(self.max_file_bytes + 1)
-            if len(content) != member.size:
-                raise SandboxError("Artifact size changed while reading")
-            return SandboxArtifact(path, content, reference.sha256, record["last_run_id"])
+        # One access for every read of the object: the identity check and the file
+        # content both come from it, so the path has to stay valid for both.
+        with self.objects.open_archive(reference) as source:
+            archive = CheckpointArchive()
+            state = archive.validate(source)
+            if (
+                state.get("binding") != record.get("checkpoint_identity")
+                or state.get("binding", {}).get("incarnation") != record["incarnation"]
+            ):
+                raise SandboxError("Artifact checkpoint does not match this session")
+            with _archive_bytes(source, archive.limits) as stream, tarfile.open(fileobj=stream, mode="r:") as contents:
+                if path is None:
+                    files = sorted(
+                        (member.name[len("workspace/") :], member.size)
+                        for member in contents
+                        if member.isfile() and member.name.startswith("workspace/")
+                    )
+                    return {
+                        "checkpoint": reference.sha256,
+                        "run_id": record["last_run_id"],
+                        "total": len(files),
+                        "files": [{"path": name, "size": size} for name, size in files[offset : offset + limit]],
+                    }
+                name = "workspace/" + path
+                _name(name)
+                try:
+                    member = contents.getmember(name)
+                except KeyError as error:
+                    raise SandboxArtifactNotFound("Workspace artifact not found") from error
+                if not member.isfile():
+                    raise SandboxArtifactNotFound("Artifact must be a regular workspace file")
+                if member.size > self.max_file_bytes:
+                    raise SandboxError("Artifact exceeds the download byte limit")
+                source_file = contents.extractfile(member)
+                assert source_file is not None
+                content = source_file.read(self.max_file_bytes + 1)
+                if len(content) != member.size:
+                    raise SandboxError("Artifact size changed while reading")
+                return SandboxArtifact(path, content, reference.sha256, record["last_run_id"])
 
     async def alist(
         self, *, agent_id: str, session_id: str, user_id: Optional[str] = None, offset: int = 0, limit: int = 100

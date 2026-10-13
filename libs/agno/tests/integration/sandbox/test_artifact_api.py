@@ -7,6 +7,7 @@ from sqlalchemy import update
 
 from agno.sandbox.artifacts import SandboxArtifactNotFound, SandboxArtifacts, SandboxSessionNotFound
 from agno.sandbox.base import SandboxError
+from agno.sandbox.checkpoint import CheckpointRef
 from tests.integration.sandbox.test_agentos import IMAGE, REDIS, URL
 from tests.integration.sandbox.test_agentos import service as _service_fixture
 
@@ -43,6 +44,9 @@ async def test_download_after_compute_is_destroyed(service):
     assert response.status_code == 200 and response.text == run_id + "\n", response.text
     assert response.headers["x-agno-checkpoint"] and response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["content-disposition"].startswith("attachment;")
+    # Pins the runtime media type against the route's OpenAPI declaration.
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert response.headers["cache-control"] == "private, no-store"
     sync = await asyncio.to_thread(
         artifacts.read, "fixture-effects.txt", agent_id="coder", session_id="session", user_id="owner"
     )
@@ -133,4 +137,123 @@ async def test_artifacts_remain_at_last_completed_turn_during_new_execution(serv
     await asyncio.wait_for(running(), 10)
     result = await artifacts.aread("fixture-effects.txt", agent_id="coder", session_id="session", user_id="owner")
     assert result.run_id == first and result.content == (first + "\n").encode()
+    # The same selection through the registered route: the live workspace has
+    # already been changed by the running turn, so different bytes exist.
+    served = await client.get("/agents/coder/sessions/session/sandbox/artifact", params={"path": "fixture-effects.txt"})
+    assert served.status_code == 200, served.text
+    assert served.content == (first + "\n").encode()
+    assert served.headers["x-agno-run-id"] == first
     await client.post(f"/agents/coder/runs/{run_id}/cancel", params={"session_id": "session"})
+
+
+async def test_malformed_artifact_paths_are_client_errors(service):
+    client, _, _, _ = service
+    await completed(service)
+    for path in (
+        "../native/session.db",
+        "/runtime/native/session.db",
+        "a/../fixture-effects.txt",
+        "a\\b",
+        "",
+        "fixture-effects.txt/",
+    ):
+        response = await client.get("/agents/coder/sessions/session/sandbox/artifact", params={"path": path})
+        assert response.status_code == 400, (path, response.status_code, response.text)
+
+
+async def test_addressable_artifact_paths_with_no_content_are_not_found(service):
+    client, _, _, _ = service
+    await completed(service)
+    # Native state is unaddressable rather than forbidden: the workspace prefix
+    # makes it a path the archive does not contain.
+    for path in ("native/session.db", "absent.txt"):
+        response = await client.get("/agents/coder/sessions/session/sandbox/artifact", params={"path": path})
+        assert response.status_code == 404, (path, response.status_code, response.text)
+
+
+async def test_resolution_precedes_path_validation(service):
+    client, _, _, _ = service
+    await completed(service)
+    response = await client.get(
+        "/agents/coder/sessions/absent-session/sandbox/artifact", params={"path": "../native/session.db"}
+    )
+    assert response.status_code == 404, response.text
+
+
+async def test_omitted_artifact_path_stays_a_validation_error(service):
+    client, _, _, _ = service
+    await completed(service)
+    response = await client.get("/agents/coder/sessions/session/sandbox/artifact")
+    assert response.status_code == 422, response.text
+
+
+class _Recorded:
+    """Delegates to the real object, recording which attributes were used."""
+
+    def __init__(self, target, log, label):
+        self._target, self._log, self._label = target, log, label
+
+    def __getattr__(self, name):
+        value = getattr(self._target, name)
+        if callable(value):
+
+            def recorded(*args, **kwargs):
+                self._log.append(self._label + "." + name + "()")
+                return value(*args, **kwargs)
+
+            return recorded
+        self._log.append(self._label + "." + name)
+        return value
+
+
+async def test_reads_never_reach_the_compute_provider(service):
+    """Status, listing and download are persisted-state reads.
+
+    Warm reuse makes this load-bearing: a read must not create, resume, execute
+    on or otherwise mutate compute, so the provider must not be called at all.
+    """
+    client, agent, _, _ = service
+    await completed(service)
+    log: list = []
+    coordinator = agent.coordinator
+    provider, transfer = coordinator.provider, coordinator.transfer
+    coordinator.provider = _Recorded(provider, log, "provider")
+    coordinator.transfer = _Recorded(transfer, log, "transfer")
+    try:
+        status = await client.get("/agents/coder/sessions/session/sandbox")
+        listing = await client.get("/agents/coder/sessions/session/sandbox/artifacts")
+        download = await client.get(
+            "/agents/coder/sessions/session/sandbox/artifact", params={"path": "fixture-effects.txt"}
+        )
+    finally:
+        coordinator.provider, coordinator.transfer = provider, transfer
+    assert (status.status_code, listing.status_code, download.status_code) == (200, 200, 200)
+    assert [entry for entry in log if entry.endswith("()")] == [], log
+    assert [entry for entry in log if entry.startswith("provider")] == [], log
+
+
+async def test_a_reference_whose_object_is_gone_is_storage_unavailable(service):
+    """Retention or storage loss leaves a published reference with no object.
+
+    That is storage being unavailable, not a servable conflict, so it must not be
+    answered as a 409 by the generic SandboxError clause.
+    """
+    client, _, _, _ = service
+    _, artifacts = await completed(service)
+    record = await artifacts._record("coder", "session", "owner")
+    await artifacts.objects.adelete(CheckpointRef(**record["checkpoint"]))
+
+    download = await client.get(
+        "/agents/coder/sessions/session/sandbox/artifact", params={"path": "fixture-effects.txt"}
+    )
+    assert download.status_code == 503, (download.status_code, download.text)
+    assert download.json()["detail"] == "Checkpoint storage is unavailable"
+    listing = await client.get("/agents/coder/sessions/session/sandbox/artifacts")
+    assert listing.status_code == 503, (listing.status_code, listing.text)
+    # Status reads the persisted record only, so it still answers and still reports
+    # the checkpoint the session committed.
+    status = await client.get("/agents/coder/sessions/session/sandbox")
+    assert status.status_code == 200 and status.json()["has_checkpoint"] is True
+    # A malformed client path is still a client error in this state.
+    malformed = await client.get("/agents/coder/sessions/session/sandbox/artifact", params={"path": "../escape"})
+    assert malformed.status_code == 400, malformed.text
