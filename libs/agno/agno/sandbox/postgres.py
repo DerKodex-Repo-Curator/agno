@@ -213,6 +213,11 @@ class PostgresSandboxStore:
         )
 
     def _write_record(self, connection: Connection, lease: SandboxLease, record: Dict[str, Any]) -> SandboxState:
+        # Track every published archive so recovery deletion does not depend on run history.
+        staged = record.get("staged_checkpoint")
+        published = record.setdefault("published_checkpoints", [])
+        if staged and staged not in published:
+            published.append(staged)
         row = (
             connection.execute(
                 update(self.bindings)
