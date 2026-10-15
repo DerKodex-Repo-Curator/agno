@@ -9,6 +9,7 @@ from fastapi.responses import Response
 from agno.os.auth import require_resource_access
 from agno.os.middleware.user_scope import assert_session_matches_component, get_scoped_user_id
 from agno.sandbox.base import SandboxError
+from agno.sandbox.checkpoint import CheckpointObjectNotFound, _name
 
 
 def add_sandbox_artifact_routes(router: APIRouter, os: Any) -> None:
@@ -38,7 +39,9 @@ def add_sandbox_artifact_routes(router: APIRouter, os: Any) -> None:
             return await operation
         except (SandboxSessionNotFound, SandboxArtifactNotFound):
             raise HTTPException(404, "Sandbox session or artifact not found")
-        except FileNotFoundError:
+        # Before the SandboxError clause below, which it is a subclass of: an object the
+        # store no longer holds is storage being unavailable, not a servable conflict.
+        except (CheckpointObjectNotFound, FileNotFoundError):
             raise HTTPException(503, "Checkpoint storage is unavailable")
         except SandboxError:
             raise HTTPException(409, "Sandbox operation could not be completed")
@@ -65,11 +68,31 @@ def add_sandbox_artifact_routes(router: APIRouter, os: Any) -> None:
             artifacts.alist(agent_id=agent_id, session_id=session_id, user_id=user_id, offset=offset, limit=limit)
         )
 
-    @router.get("/agents/{agent_id}/sessions/{session_id}/sandbox/artifact", tags=["Agents"], dependencies=dependencies)
+    @router.get(
+        "/agents/{agent_id}/sessions/{session_id}/sandbox/artifact",
+        tags=["Agents"],
+        dependencies=dependencies,
+        # Response carries no media type of its own, so FastAPI emits no default
+        # JSON entry and the declaration below is the only advertised 200 content.
+        response_class=Response,
+        responses={
+            200: {
+                "description": "Workspace file bytes from the last completed checkpoint",
+                "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}},
+            }
+        },
+    )
     async def sandbox_artifact(
         request: Request, agent_id: str, session_id: str, path: str = Query(..., max_length=4096)
     ) -> Response:
         artifacts, user_id = await resolve(request, agent_id, session_id)
+        try:
+            # The archive grammar the service already enforces, applied here only so a
+            # malformed request is answered as one instead of as a checkpoint conflict.
+            # Order matters: resolution and its authorization run first.
+            _name("workspace/" + path)
+        except SandboxError as error:
+            raise HTTPException(400, str(error)) from error
         artifact = await call(artifacts.aread(path, agent_id=agent_id, session_id=session_id, user_id=user_id))
         filename = quote(path.rsplit("/", 1)[-1], safe="")
         return Response(
