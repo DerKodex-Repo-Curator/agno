@@ -29,6 +29,7 @@ from agno.db.schemas.service_accounts import (
     validate_service_account_update,
 )
 from agno.db.sql import authz as authz_sql
+from agno.db.sql import run_previews as run_previews_sql
 from agno.db.sqlite.schemas import get_table_schema_definition
 from agno.db.sqlite.utils import (
     abulk_upsert_metrics,
@@ -1416,6 +1417,32 @@ class AsyncSqliteDb(AsyncBaseDb):
                 return session_obj
             return deserialize_session(session_type, session_raw)
 
+        except Exception as e:
+            log_debug(f"Exception reading from sessions table: {e}")
+            raise e
+
+    async def get_session_run_previews(
+        self,
+        session_id: str,
+        session_type: Optional[SessionType] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Session metadata plus preview-sized runs, projected out of ``run_data`` in SQL."""
+        try:
+            table = await self._get_table(table_type="sessions")
+            if table is None:
+                return None
+            runs_table = await self._get_table(table_type="runs")
+            async with self.async_session_factory() as sess:
+                return await run_previews_sql.aread_session_previews(
+                    sess,
+                    table,
+                    runs_table,
+                    session_id,
+                    session_type,
+                    user_id,
+                    json_access=run_previews_sql.SQLITE_JSON,
+                )
         except Exception as e:
             log_debug(f"Exception reading from sessions table: {e}")
             raise e

@@ -44,13 +44,20 @@ from agno.db.surrealdb.queries import COUNT_QUERY, WhereClause, order_limit_star
 from agno.db.surrealdb.utils import build_client
 from agno.db.utils import (
     HISTORY_SKIP_STATUSES,
+    PREVIEW_FALLBACK_KEYS,
+    RUN_PREVIEW_KEYS,
+    SESSION_PREVIEW_KEYS,
     build_single_run_row,
+    complete_preview_session,
     deserialize_run,
     deserialize_session,
     deserialize_sessions,
     drop_legacy_metrics,
     filter_context_runs,
     merge_runs_table_with_legacy_blob,
+    preview_run_needs_full_data,
+    resolve_preview_session_type,
+    run_from_preview_projection,
 )
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -626,6 +633,63 @@ class SurrealDb(BaseDb):
             return desurrealized
 
         return deserialize_session(session_type, desurrealized)
+
+    def get_session_run_previews(
+        self,
+        session_id: str,
+        session_type: Optional[SessionType] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Session metadata plus preview-sized runs, projected out of ``run_data`` by the server."""
+        where = WhereClause()
+        if user_id is not None:
+            where = where.and_("user_id", user_id)
+        where_clause, where_vars = where.build()
+        # Sessions link their component as a record (agent/team/workflow); desurrealize_session maps it back.
+        raw = self._query_one(
+            f"SELECT id, runs, user_id, agent, team, workflow FROM ONLY $record {where_clause}",
+            {"record": RecordID(self._get_table("sessions"), session_id), **where_vars},
+            dict,
+        )
+        if raw is None:
+            return None
+        session = desurrealize_session(raw)
+        legacy_runs = session.pop("runs", None)
+        session = {key: session.get(key) for key in SESSION_PREVIEW_KEYS}
+        resolved = resolve_preview_session_type(session, session_type)
+
+        runs: List[Dict[str, Any]] = []
+        fallbacks: Dict[str, Dict[str, Any]] = {}
+        try:
+            runs_table = self._get_table("runs", create_table_if_not_found=False)
+        except Exception:
+            runs_table = None
+        if runs_table is not None:
+            columns = ", ".join(f"run_data.{key} AS {key}" for key in RUN_PREVIEW_KEYS)
+            # A workflow run previews its raw input, which is small; other runs carry media beside input_content.
+            rows = self._query(
+                f"SELECT {columns}, run_data.input.input_content AS input_content, "
+                "(IF run_data.workflow_id != NONE AND run_data.workflow_id != NULL THEN run_data.input END) "
+                "AS workflow_input, run_index ?? 0 AS _ri, created_at ?? 0 AS _ca "
+                f"FROM {runs_table} WHERE session_id = $sid ORDER BY _ri ASC, _ca ASC",
+                {"sid": session_id},
+                dict,
+            )
+            runs = [run_from_preview_projection(row) for row in rows]
+            missing = [run["run_id"] for run in runs if preview_run_needs_full_data(run, resolved)]
+            if missing:
+                fallback_columns = ", ".join(f"run_data.{key} AS {key}" for key in PREVIEW_FALLBACK_KEYS)
+                fallback_rows = self._query(
+                    f"SELECT run_data.run_id AS run_id, {fallback_columns} FROM {runs_table} "
+                    "WHERE session_id = $sid AND run_data.run_id IN $ids",
+                    {"sid": session_id, "ids": missing},
+                    dict,
+                )
+                fallbacks = {
+                    row["run_id"]: {key: row[key] for key in PREVIEW_FALLBACK_KEYS if row.get(key) is not None}
+                    for row in fallback_rows
+                }
+        return complete_preview_session(session, legacy_runs, runs, fallbacks, resolved)
 
     def get_sessions(
         self,

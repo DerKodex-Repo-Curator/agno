@@ -38,6 +38,7 @@ from agno.db.schemas.service_accounts import (
     validate_service_account_update,
 )
 from agno.db.sql import authz as authz_sql
+from agno.db.sql import run_previews as run_previews_sql
 from agno.db.utils import (
     HISTORY_SKIP_STATUSES,
     SessionRunObjectCache,
@@ -1423,6 +1424,32 @@ class AsyncPostgresDb(AsyncBaseDb):
         except Exception as e:
             log_error(f"Exception reading from session table: {str(e)}")
             return None
+
+    async def get_session_run_previews(
+        self,
+        session_id: str,
+        session_type: Optional[SessionType] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Session metadata plus preview-sized runs, projected out of ``run_data`` in SQL."""
+        try:
+            table = await self._get_table(table_type="sessions")
+            if table is None:
+                return None
+            runs_table = await self._get_table(table_type="runs")
+            async with self.async_session_factory() as sess:
+                return await run_previews_sql.aread_session_previews(
+                    sess,
+                    table,
+                    runs_table,
+                    session_id,
+                    session_type,
+                    user_id,
+                    json_access=run_previews_sql.POSTGRES_JSON,
+                )
+        except Exception as e:
+            log_error(f"Exception reading from session table: {str(e)}")
+            raise e
 
     async def get_sessions(
         self,

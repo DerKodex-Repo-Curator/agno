@@ -21,6 +21,7 @@ from agno.db.utils import (
     drop_legacy_metrics,
     filter_context_runs,
     metrics_starting_date_from_records,
+    slim_session_for_previews,
 )
 from agno.session import AgentSession, Session, TeamSession, WorkflowSession
 from agno.utils.log import log_debug, log_error, log_info, log_warning
@@ -219,6 +220,20 @@ class InMemoryDb(BaseDb):
 
         session.runs = runs
         return session
+
+    def get_session_run_previews(
+        self,
+        session_id: str,
+        session_type: Optional[SessionType] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Session metadata plus preview-sized runs; slims before copying so full runs are never copied."""
+        session_data = self._sessions.get(session_id)
+        if session_data is None:
+            return None
+        if user_id is not None and session_data.get("user_id") != user_id:
+            return None
+        return deepcopy(slim_session_for_previews(session_data, session_type))
 
     def get_sessions(
         self,

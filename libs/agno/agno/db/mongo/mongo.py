@@ -20,8 +20,13 @@ from agno.db.mongo.utils import (
     bulk_upsert_metrics,
     calculate_date_metrics,
     create_collection_indexes,
+    fallbacks_from_docs,
     fetch_all_sessions_data,
     get_dates_to_calculate_metrics_for,
+    preview_session_from_doc,
+    run_preview_fallback_query,
+    run_preview_pipeline,
+    session_preview_query,
 )
 from agno.db.schemas.evals import EvalFilterType, EvalRunRecord, EvalType
 from agno.db.schemas.knowledge import KnowledgeRow
@@ -29,6 +34,7 @@ from agno.db.schemas.memory import UserMemory
 from agno.db.utils import (
     HISTORY_SKIP_STATUSES,
     build_single_run_row,
+    complete_preview_session,
     deserialize_run,
     deserialize_session,
     deserialize_session_json_fields,
@@ -37,6 +43,9 @@ from agno.db.utils import (
     filter_context_runs,
     merge_runs_table_with_legacy_blob,
     metrics_starting_date_from_days,
+    preview_run_needs_full_data,
+    resolve_preview_session_type,
+    run_from_preview_projection,
 )
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -772,6 +781,36 @@ class MongoDb(BaseDb):
 
             return deserialize_session(session_type, session)
 
+        except Exception as e:
+            log_error(f"Exception reading session: {str(e)}")
+            raise e
+
+    def get_session_run_previews(
+        self,
+        session_id: str,
+        session_type: Optional[SessionType] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Session metadata plus preview-sized runs, projected out of ``run_data`` by the server."""
+        try:
+            collection = self._get_collection(table_type="sessions")
+            if collection is None:
+                return None
+            doc = collection.find_one(*session_preview_query(session_id, user_id))
+            if doc is None:
+                return None
+            session, legacy_runs = preview_session_from_doc(doc)
+            resolved = resolve_preview_session_type(session, session_type)
+            runs: List[Dict[str, Any]] = []
+            fallbacks: Dict[str, Dict[str, Any]] = {}
+            runs_collection = self._get_collection(table_type="runs", create_collection_if_not_found=True)
+            if runs_collection is not None:
+                pipeline = run_preview_pipeline(session_id)
+                runs = [run_from_preview_projection(row) for row in runs_collection.aggregate(pipeline)]
+                missing = [run["run_id"] for run in runs if preview_run_needs_full_data(run, resolved)]
+                if missing:
+                    fallbacks = fallbacks_from_docs(runs_collection.find(*run_preview_fallback_query(missing)))
+            return complete_preview_session(session, legacy_runs, runs, fallbacks, resolved)
         except Exception as e:
             log_error(f"Exception reading session: {str(e)}")
             raise e

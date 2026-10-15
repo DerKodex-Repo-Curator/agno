@@ -21,7 +21,11 @@ from agno.db.schemas.evals import EvalFilterType, EvalRunRecord, EvalType
 from agno.db.schemas.knowledge import KnowledgeRow
 from agno.db.schemas.memory import UserMemory
 from agno.db.utils import (
+    PREVIEW_FALLBACK_KEYS,
+    RUN_PREVIEW_KEYS,
+    SESSION_PREVIEW_KEYS,
     build_single_run_row,
+    complete_preview_session,
     deserialize_run,
     deserialize_session,
     deserialize_session_json_fields,
@@ -30,6 +34,9 @@ from agno.db.utils import (
     filter_context_runs,
     merge_runs_table_with_legacy_blob,
     metrics_starting_date_from_records,
+    preview_run_needs_full_data,
+    resolve_preview_session_type,
+    run_from_preview_projection,
 )
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -737,6 +744,73 @@ class FirestoreDb(BaseDb):
         except Exception as e:
             log_error(f"Exception reading session: {str(e)}")
             raise e
+
+    def get_session_run_previews(
+        self,
+        session_id: str,
+        session_type: Optional[SessionType] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Session metadata plus preview-sized runs, selected field by field out of ``run_data``."""
+        try:
+            collection_ref = self._get_collection(table_type="sessions")
+            runs_collection_ref = self._get_collection(table_type="runs", create_collection_if_not_found=False)
+
+            query = collection_ref.where(filter=FieldFilter("session_id", "==", session_id))
+            if user_id is not None:
+                query = query.where(filter=FieldFilter("user_id", "==", user_id))
+            result = next((doc.to_dict() for doc in query.select([*SESSION_PREVIEW_KEYS, "runs"]).stream()), None)
+            if result is None:
+                return None
+            legacy_runs = result.get("runs")
+            session = {key: result.get(key) for key in SESSION_PREVIEW_KEYS}
+            resolved = resolve_preview_session_type(session, session_type)
+
+            runs: List[Dict[str, Any]] = []
+            fallbacks: Dict[str, Dict[str, Any]] = {}
+            if runs_collection_ref is not None:
+                fields = [f"run_data.{key}" for key in RUN_PREVIEW_KEYS] + ["run_data.input.input_content"]
+                query = (
+                    runs_collection_ref.where(filter=FieldFilter("session_id", "==", session_id))
+                    .order_by("run_index")
+                    .order_by("created_at")
+                    .select(fields)
+                )
+                for doc in query.stream():
+                    run_data = (doc.to_dict() or {}).get("run_data") or {}
+                    values = {key: run_data.get(key) for key in RUN_PREVIEW_KEYS}
+                    values["input_content"] = (run_data.get("input") or {}).get("input_content")
+                    runs.append(run_from_preview_projection(values))
+                # Firestore cannot select conditionally: workflow runs read their raw input in a second pass.
+                workflow_inputs = self._get_run_fields(
+                    runs_collection_ref,
+                    [run["run_id"] for run in runs if run.get("workflow_id") is not None],
+                    ("input",),
+                )
+                for run in runs:
+                    if workflow_inputs.get(run["run_id"], {}).get("input") is not None:
+                        run["input"] = workflow_inputs[run["run_id"]]["input"]
+                missing = [run["run_id"] for run in runs if preview_run_needs_full_data(run, resolved)]
+                fallbacks = self._get_run_fields(runs_collection_ref, missing, PREVIEW_FALLBACK_KEYS)
+            return complete_preview_session(session, legacy_runs, runs, fallbacks, resolved)
+        except Exception as e:
+            log_error(f"Exception reading session: {str(e)}")
+            raise e
+
+    def _get_run_fields(
+        self, runs_collection_ref, run_ids: List[str], keys: Tuple[str, ...]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Selected ``run_data`` keys for the given runs, by run_id (Firestore caps ``in`` at 30 values)."""
+        found: Dict[str, Dict[str, Any]] = {}
+        for start in range(0, len(run_ids), 30):
+            query = runs_collection_ref.where(filter=FieldFilter("run_id", "in", run_ids[start : start + 30])).select(
+                ["run_id", *(f"run_data.{key}" for key in keys)]
+            )
+            for doc in query.stream():
+                data = doc.to_dict() or {}
+                run_data = data.get("run_data") or {}
+                found[data["run_id"]] = {key: run_data[key] for key in keys if run_data.get(key) is not None}
+        return found
 
     def get_sessions(
         self,

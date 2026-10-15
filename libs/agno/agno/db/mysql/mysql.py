@@ -23,6 +23,7 @@ from agno.db.mysql.utils import (
 from agno.db.schemas.evals import EvalFilterType, EvalRunRecord, EvalType
 from agno.db.schemas.knowledge import KnowledgeRow
 from agno.db.schemas.memory import UserMemory
+from agno.db.sql import run_previews as run_previews_sql
 from agno.db.utils import (
     HISTORY_SKIP_STATUSES,
     SessionRunObjectCache,
@@ -1021,6 +1022,32 @@ class MySQLDb(BaseDb):
         except Exception as e:
             log_error(f"Exception reading from session table: {str(e)}")
             return None
+
+    def get_session_run_previews(
+        self,
+        session_id: str,
+        session_type: Optional[SessionType] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Session metadata plus preview-sized runs, projected out of ``run_data`` in SQL."""
+        try:
+            table = self._get_table(table_type="sessions")
+            if table is None:
+                return None
+            runs_table = self._get_table(table_type="runs")
+            with self.Session() as sess:
+                return run_previews_sql.read_session_previews(
+                    sess,
+                    table,
+                    runs_table,
+                    session_id,
+                    session_type,
+                    user_id,
+                    json_access=run_previews_sql.MYSQL_JSON,
+                )
+        except Exception as e:
+            log_error(f"Exception reading from session table: {str(e)}")
+            raise e
 
     def get_sessions(
         self,

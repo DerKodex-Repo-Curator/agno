@@ -498,6 +498,120 @@ def merge_runs_table_with_legacy_blob(
     return merged
 
 
+# Run keys the run-previews listing reads (besides ``input``); everything else
+# in a stored run (messages, events, metrics, media, step results) stays in storage.
+RUN_PREVIEW_KEYS: Tuple[str, ...] = (
+    "run_id",
+    "parent_run_id",
+    "agent_id",
+    "team_id",
+    "workflow_id",
+    "user_id",
+    "status",
+    "created_at",
+    "content",
+)
+# Session columns the run-previews read needs: scoping and type detection only.
+SESSION_PREVIEW_KEYS: Tuple[str, ...] = ("session_id", "session_type", "agent_id", "team_id", "workflow_id", "user_id")
+
+
+def resolve_preview_session_type(session: Dict[str, Any], session_type: Optional["SessionType"]) -> "SessionType":
+    from agno.db.base import SessionType
+
+    return session_type if session_type is not None else SessionType(detect_session_type(session))
+
+
+def preview_run_needs_full_data(run: Dict[str, Any], session_type: "SessionType") -> bool:
+    """True when ``get_run_input`` would fall back to messages / step runs for this run.
+
+    Mirrors the run classification: only workflow runs of a workflow session read
+    the raw ``input``; every other run reads ``input.input_content``.
+    """
+    from agno.db.base import SessionType
+
+    run_input = run.get("input")
+    if session_type == SessionType.WORKFLOW and run.get("workflow_id") is not None:
+        return run_input is None
+    return not (isinstance(run_input, dict) and run_input.get("input_content") is not None)
+
+
+def slim_run_for_preview(run: Dict[str, Any], session_type: "SessionType") -> Dict[str, Any]:
+    """Reduce a stored run dict to what the preview listing reads."""
+    slim = {key: run[key] for key in RUN_PREVIEW_KEYS if key in run}
+    if preview_run_needs_full_data(run, session_type):
+        for key in ("input", "messages", "step_executor_runs"):
+            if key in run:
+                slim[key] = run[key]
+    elif run.get("workflow_id") is not None:
+        slim["input"] = run["input"]
+    else:
+        slim["input"] = {"input_content": run["input"]["input_content"]}
+    return slim
+
+
+def run_from_preview_projection(values: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a run dict from a projected read.
+
+    ``values`` holds the ``RUN_PREVIEW_KEYS`` read out of ``run_data`` plus
+    ``input_content`` (``input.input_content``) and ``workflow_input`` (the whole
+    ``input``, projected only for runs carrying a ``workflow_id``). Stored runs
+    never hold ``None`` values, so a ``None`` read means the key is absent.
+    """
+    run = {key: values[key] for key in RUN_PREVIEW_KEYS if values.get(key) is not None}
+    if values.get("workflow_input") is not None:
+        run["input"] = values["workflow_input"]
+    elif values.get("input_content") is not None:
+        run["input"] = {"input_content": values["input_content"]}
+    return run
+
+
+def merge_preview_runs(
+    table_runs: List[Dict[str, Any]], legacy_runs: Optional[List[Any]], session_type: "SessionType"
+) -> List[Dict[str, Any]]:
+    """Merge projected runs-table rows with a legacy ``runs`` blob, slimming the blob's runs."""
+    if isinstance(legacy_runs, str):
+        try:
+            legacy_runs = json.loads(legacy_runs)
+        except (json.JSONDecodeError, TypeError):
+            log_warning("Could not parse legacy runs blob during merge; ignoring it")
+            legacy_runs = None
+    if not legacy_runs:
+        return table_runs
+    slim_legacy = [slim_run_for_preview(run, session_type) for run in legacy_runs if isinstance(run, dict)]
+    return merge_runs_table_with_legacy_blob(table_runs, slim_legacy)
+
+
+# What the input preview falls back to when a run stored no usable input.
+PREVIEW_FALLBACK_KEYS: Tuple[str, ...] = ("input", "messages", "step_executor_runs")
+
+
+def complete_preview_session(
+    session: Dict[str, Any],
+    legacy_runs: Any,
+    runs: List[Dict[str, Any]],
+    fallbacks: Dict[str, Dict[str, Any]],
+    session_type: "SessionType",
+) -> Dict[str, Any]:
+    """Fold fallback reads (``PREVIEW_FALLBACK_KEYS`` by run_id) into projected runs, then merge the legacy blob."""
+    runs = [
+        slim_run_for_preview({**run, **fallbacks[run["run_id"]]}, session_type) if run["run_id"] in fallbacks else run
+        for run in runs
+    ]
+    session["runs"] = merge_preview_runs(runs, legacy_runs, session_type)
+    return session
+
+
+def slim_session_for_previews(session: Dict[str, Any], session_type: Optional["SessionType"]) -> Dict[str, Any]:
+    """Session metadata plus slim runs, from a full session dict."""
+    resolved = resolve_preview_session_type(session, session_type)
+    preview = {key: session.get(key) for key in SESSION_PREVIEW_KEYS}
+    source = session.get("runs")
+    if isinstance(source, str):
+        source = json.loads(source)
+    preview["runs"] = [slim_run_for_preview(run, resolved) for run in source or [] if isinstance(run, dict)]
+    return preview
+
+
 async def resolve_session_type(
     db: Union["BaseDb", "AsyncBaseDb"],
     session_id: str,

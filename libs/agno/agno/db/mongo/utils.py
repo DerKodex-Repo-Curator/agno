@@ -3,7 +3,7 @@
 import json
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
 
 from agno.db.mongo.schemas import get_collection_indexes
@@ -355,3 +355,58 @@ async def abulk_upsert_metrics(
             continue
 
     return results
+
+
+# -- Run previews --
+def run_preview_pipeline(session_id: str) -> List[Dict[str, Any]]:
+    """Aggregation reading only the preview keys out of each run's ``run_data``, in insertion order."""
+    from agno.db.utils import RUN_PREVIEW_KEYS
+
+    project: Dict[str, Any] = {"_id": 0, **{key: f"$run_data.{key}" for key in RUN_PREVIEW_KEYS}}
+    project["input_content"] = "$run_data.input.input_content"
+    # A workflow run previews its raw input, which is small; other runs carry media beside input_content.
+    project["workflow_input"] = {
+        "$cond": [
+            {"$in": [{"$type": "$run_data.workflow_id"}, ["missing", "null"]]},
+            "$$REMOVE",
+            "$run_data.input",
+        ]
+    }
+    return [
+        {"$match": {"session_id": session_id}},
+        {"$addFields": {"_ri": {"$ifNull": ["$run_index", 0]}, "_ca": {"$ifNull": ["$created_at", 0]}}},
+        {"$sort": {"_ri": 1, "_ca": 1}},
+        {"$project": project},
+    ]
+
+
+def run_preview_fallback_query(run_ids: List[str]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Filter and projection for what the input preview falls back to, for runs that stored no usable input."""
+    from agno.db.utils import PREVIEW_FALLBACK_KEYS
+
+    projection: Dict[str, Any] = {"_id": 0, "run_id": 1, **{f"run_data.{key}": 1 for key in PREVIEW_FALLBACK_KEYS}}
+    return {"run_id": {"$in": run_ids}}, projection
+
+
+def session_preview_query(session_id: str, user_id: Optional[str]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Filter and projection for a session's scoping/type fields plus any legacy ``runs`` blob."""
+    from agno.db.utils import SESSION_PREVIEW_KEYS
+
+    query: Dict[str, Any] = {"session_id": session_id}
+    if user_id is not None:
+        query["user_id"] = user_id
+    return query, {"_id": 0, "runs": 1, **{key: 1 for key in SESSION_PREVIEW_KEYS}}
+
+
+def fallbacks_from_docs(docs: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    return {
+        doc["run_id"]: {key: value for key, value in (doc.get("run_data") or {}).items() if value is not None}
+        for doc in docs
+    }
+
+
+def preview_session_from_doc(doc: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
+    """Session preview dict and the raw legacy ``runs`` blob from a ``session_preview_query`` doc."""
+    from agno.db.utils import SESSION_PREVIEW_KEYS
+
+    return {key: doc.get(key) for key in SESSION_PREVIEW_KEYS}, doc.get("runs")

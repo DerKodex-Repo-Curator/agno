@@ -557,6 +557,27 @@ class BaseDb(ABC):
         # (a safe, unbounded superset); adapters that can push it to the DB do so.
         raise NotImplementedError
 
+    def get_session_run_previews(
+        self,
+        session_id: str,
+        session_type: Optional[SessionType] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Session metadata plus its runs reduced to the fields a run-previews listing reads.
+
+        Returns ``None`` when the session does not exist (or is not ``user_id``'s).
+        Runs keep ids, status, ``created_at``, ``content`` and ``input``; ``messages``
+        and ``step_executor_runs`` ride along only when the input preview falls back
+        to them. This default reads the full session; adapters that can project
+        inside the database override it.
+        """
+        from agno.db.utils import slim_session_for_previews
+
+        session = self.get_session(session_id=session_id, session_type=session_type, user_id=user_id, deserialize=False)
+        if not session:
+            return None
+        return slim_session_for_previews(session, session_type)  # type: ignore[arg-type]
+
     @abstractmethod
     def get_sessions(
         self,
@@ -2523,6 +2544,22 @@ class AsyncBaseDb(ABC):
     ) -> Optional[Union[Session, Dict[str, Any]]]:
         # See BaseDb.get_session for the runs_limit contract.
         raise NotImplementedError
+
+    async def get_session_run_previews(
+        self,
+        session_id: str,
+        session_type: Optional[SessionType] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Async twin of ``BaseDb.get_session_run_previews``."""
+        from agno.db.utils import slim_session_for_previews
+
+        session = await self.get_session(
+            session_id=session_id, session_type=session_type, user_id=user_id, deserialize=False
+        )
+        if not session:
+            return None
+        return slim_session_for_previews(session, session_type)  # type: ignore[arg-type]
 
     @abstractmethod
     async def get_sessions(
